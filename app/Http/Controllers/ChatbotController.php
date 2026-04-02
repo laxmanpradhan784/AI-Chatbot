@@ -15,7 +15,7 @@ class ChatbotController extends Controller
         $chatHistory = [];
         if (Session::has('user_id')) {
             $chatHistory = ChatHistory::where('user_id', Session::get('user_id'))
-                ->orderBy('created_at', 'desc')
+                ->orderBy('created_at', 'asc') // Changed to 'asc' for chronological order
                 ->get();
         }
         return view('chatbot', compact('chatHistory'));
@@ -24,7 +24,7 @@ class ChatbotController extends Controller
     public function sendMessage(Request $request)
     {
         $request->validate([
-            'message' => 'required|string'
+            'message' => 'required|string|max:2000'
         ]);
         
         $userMessage = $request->message;
@@ -76,13 +76,21 @@ class ChatbotController extends Controller
                 'stream' => false,
                 'options' => [
                     'num_predict' => 500,
-                    'temperature' => 0.7
+                    'temperature' => 0.7,
+                    'top_p' => 0.9,
+                    'stop' => ['</s>', 'Human:', 'Assistant:']
                 ]
             ]);
             
             if ($response->successful()) {
                 $data = $response->json();
                 $aiResponse = $data['response'] ?? 'Sorry, no response generated.';
+                
+                // Clean up response
+                $aiResponse = trim($aiResponse);
+                if (empty($aiResponse)) {
+                    $aiResponse = "I'm not sure how to respond to that. Could you please rephrase your question?";
+                }
             } else {
                 $aiResponse = "Ollama error: " . $response->status() . " - " . $response->body();
             }
@@ -101,7 +109,129 @@ class ChatbotController extends Controller
         }
         
         return response()->json([
-            'response' => $aiResponse
+            'response' => $aiResponse,
+            'model_used' => $model
         ]);
+    }
+    
+    public function clearChat(Request $request)
+    {
+        // Clear chat history for logged-in user
+        if (Session::has('user_id')) {
+            ChatHistory::where('user_id', Session::get('user_id'))->delete();
+            return response()->json([
+                'success' => true,
+                'message' => 'Chat history cleared successfully'
+            ]);
+        }
+        
+        return response()->json([
+            'success' => false,
+            'error' => 'User not logged in'
+        ], 401);
+    }
+    
+    public function getChatHistory(Request $request)
+    {
+        if (Session::has('user_id')) {
+            $chatHistory = ChatHistory::where('user_id', Session::get('user_id'))
+                ->orderBy('created_at', 'asc')
+                ->get();
+            
+            return response()->json([
+                'success' => true,
+                'history' => $chatHistory
+            ]);
+        }
+        
+        return response()->json([
+            'success' => false,
+            'error' => 'User not logged in'
+        ], 401);
+    }
+    
+    public function deleteMessage($id)
+    {
+        if (Session::has('user_id')) {
+            $message = ChatHistory::where('user_id', Session::get('user_id'))
+                ->where('id', $id)
+                ->first();
+            
+            if ($message) {
+                $message->delete();
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Message deleted successfully'
+                ]);
+            }
+            
+            return response()->json([
+                'success' => false,
+                'error' => 'Message not found'
+            ], 404);
+        }
+        
+        return response()->json([
+            'success' => false,
+            'error' => 'User not logged in'
+        ], 401);
+    }
+    
+    public function getModels(Request $request)
+    {
+        try {
+            $settings = ChatbotSetting::all();
+            $ollamaUrl = 'http://localhost:11434';
+            
+            foreach ($settings as $setting) {
+                if ($setting->setting_key === 'ollama_api_url') {
+                    $ollamaUrl = $setting->setting_value;
+                }
+            }
+            
+            $response = Http::timeout(5)->get($ollamaUrl . '/api/tags');
+            
+            if ($response->successful()) {
+                $data = $response->json();
+                $models = [];
+                
+                if (isset($data['models'])) {
+                    foreach ($data['models'] as $model) {
+                        $models[] = [
+                            'name' => $model['name'],
+                            'size' => $this->formatSize($model['size'] ?? 0),
+                            'modified' => $model['modified_at'] ?? null
+                        ];
+                    }
+                }
+                
+                return response()->json([
+                    'success' => true,
+                    'models' => $models
+                ]);
+            }
+            
+            return response()->json([
+                'success' => false,
+                'error' => 'Failed to fetch models'
+            ], 500);
+            
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+    
+    private function formatSize($bytes)
+    {
+        $units = ['B', 'KB', 'MB', 'GB'];
+        $i = 0;
+        while ($bytes >= 1024 && $i < count($units) - 1) {
+            $bytes /= 1024;
+            $i++;
+        }
+        return round($bytes, 2) . ' ' . $units[$i];
     }
 }
